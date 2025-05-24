@@ -5,6 +5,7 @@
 curl -sSL https://get.docker.com/ | sh
 ```
 Иначе Docker-desktop
+https://www.docker.com/products/docker-desktop/
 
 ## Ставим kind
 https://kind.sigs.k8s.io/docs/user/quick-start/#installation
