@@ -1,4 +1,10 @@
 # Устанавливаем стенд
+## Docker
+Для Linux или внутри windows subsystem for linux
+```bash
+curl -sSL https://get.docker.com/ | sh
+```
+Иначе Docker-desktop
 
 ## Ставим kind
 https://kind.sigs.k8s.io/docs/user/quick-start/#installation
@@ -18,8 +24,13 @@ nodes:
     protocol: TCP
 EOF
 ```
-
 Далее ждём минуту пока поднимется кластер.
+
+## Устанавливаем kubectl
+https://kubernetes.io/docs/tasks/tools/
+
+## Устанавливаем k9s
+https://webinstall.dev/k9s/
 
 Нужно установить сам goat:
 ```bash
