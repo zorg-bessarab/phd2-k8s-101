@@ -33,7 +33,7 @@ https://kubernetes.io/docs/tasks/tools/
 ## Устанавливаем k9s
 https://webinstall.dev/k9s/
 
-Нужно установить сам goat:
+## Устанавливаем сам goat:
 ```bash
 git clone https://github.com/madhuakula/kubernetes-goat.git
 cd kubernetes-goat
